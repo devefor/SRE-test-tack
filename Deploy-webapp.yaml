@@ -1,0 +1,101 @@
+# Мультизональный кластер (3 зоны) - 5 нод + хотим максимально отказоустойчивый deployment
+# => | высокая отказоустойчивость достигается при размещении в каждой зоне по реплике приложения,
+#    | тогда сбой в одной зоне не приведет к полному падению приложения.
+#    | НЕльзя размещать все реплики на одной ноде т.к. отказ = недоступность всего приложения
+
+# Приложение запускается ~5-10 секунд.
+# Первые запросы требуют повышенной CPU (0.5 CPU поставим), затем нагрузка
+# выравнивается около 0.1 CPU на под. Потребление памяти стабильно ~128 M.
+# Это значит, что при развертывании новых Pod нужно учитывать задержку готовности
+# и короткий период повышенного потребления CPU.
+
+# Неравномерная суточная нагрузка: Ночью трафик ниже, днём – пик нагрузки.
+# По результатам тестирования 4 под справляются с пиковым дневным трафиком. Ночью столько ресурсов не требуется.
+# Необходимо минимизировать ресурсные затраты ночью, но обеспечить максимальную отказоустойчивость.
+
+# Автомасштабирование: Horizontal Pod Autoscaler (HPA) или CronJob, если первый недоступен.
+# Значит, автоматическое масштабирование по метрикам CPU можно использовать в первом случае.
+# Во втором случае придётся использовать масштабирование по расписанию исходя из пика нагрузки.
+
+# Если подов 0, входящий трафик некуда направлять. Поэтому даже при низкой нагрузке нельзя масштабировать до 0
+# => должно быть запущено как минимум N≥1 Pod, с учётом отказоустойчивости лучше ≥2.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dp-webapp
+  namespace: default
+  labels:
+    type: webapp
+spec:
+  # Ночью - 2 реплики (минимум для отказоустойчивости), днём - 4 для пиковой нагрузки
+  replicas: 2
+  strategy:
+    # При деплое новой версии сначала развернется дополнительный под
+    # и по его готовности будет выключен один из старых
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  revisionHistoryLimit: 7
+  selector:
+    matchLabels:
+      type: webapp
+  template:
+    metadata:
+      name: pod-webapp
+      labels:
+        type: webapp
+    spec:
+      terminationGracePeriodSeconds: 20
+      topologySpreadConstraints:
+        # Размещение реплик в разных зонах, кол-во реплик между зонами может отличаться на 1
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              type: webapp
+      affinity:
+        # Запрет на размещение двух подов на одной ноде
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  type: webapp
+      containers:
+        - name: webapp
+          image: example-webapp
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "192Mi"
+          # Старт контейнера за 5-10 с, после проверяем на готовность
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+            periodSeconds: 5
+          # Проверка на завис/не завис
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+            periodSeconds: 15
+
+# Насчет 128M в memory
+# 1 M != 1 Mi
+# 10^6 B != 2^20 B

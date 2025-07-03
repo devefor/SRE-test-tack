@@ -1,0 +1,44 @@
+# Необходимо для начала создать SA с правами scale
+
+# Масштабируем через CronJob по расписанию
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-up-webapp
+  namespace: default
+spec:
+  # Увеличение до 4 реплик в 8 утра каждывй день
+  schedule: "0 8 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scale-operator
+          restartPolicy: OnFailure
+          containers:
+          - name: scaler
+            image:  container-with-kubectl
+            command: ["/bin/sh", "-c"]
+            args:
+            - kubectl scale deployment dp-webapp -n default --replicas=4
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down-webapp
+  namespace: default
+spec:
+  # Уменьшение до 2 реплик в 0 каждый день
+  schedule: "0 0 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: scale-operator
+          restartPolicy: OnFailure
+          containers:
+          - name: scaler
+            image: container-with-kubectl
+            command: ["/bin/sh", "-c"]
+            args:
+            - kubectl scale deployment dp-webapp -n default --replicas=2
